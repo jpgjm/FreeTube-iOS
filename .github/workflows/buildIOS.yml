@@ -34,14 +34,19 @@ jobs:
         run: xcodebuild -version
 
       # -------- Node.js + yarn (FreeTube 標準) --------
+      # 上流 FreeTube の buildCordova.yml と同じ Node 22 を使う。
+      # @electron/rebuild@4.x が Node >=22.12 を要求するため 20 では失敗する。
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'yarn'
 
       - name: Install dependencies
-        run: yarn install --frozen-lockfile
+        # --ignore-engines は electron 系 dev deps と autolinker@4.1.5 (pnpm
+        # 誤検知) を回避する保険。iOS ビルドは Electron を使わないが
+        # yarn.lock に載っている以上 install はされる。
+        run: yarn install --frozen-lockfile --ignore-engines
 
       # -------- webpack で Vue app を www/ にビルド --------
       - name: Build web assets (ios)
