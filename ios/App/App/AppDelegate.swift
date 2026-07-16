@@ -22,9 +22,19 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // -----------------------------------------------------------------
         do {
             let session = AVAudioSession.sharedInstance()
+            // Bluetooth 経由再生対応:
+            //   iOS 18+ では `.allowBluetooth` が deprecated になり、
+            //   `.allowBluetoothHFP` に改名された (機能は同じ)。
+            //   deployment target は iOS 15.0 なので #available で振り分ける。
+            let bluetoothOption: AVAudioSession.CategoryOptions
+            if #available(iOS 18.0, *) {
+                bluetoothOption = .allowBluetoothHFP
+            } else {
+                bluetoothOption = .allowBluetooth
+            }
             try session.setCategory(.playback,
                                     mode: .moviePlayback,
-                                    options: [.allowAirPlay, .allowBluetooth])
+                                    options: [.allowAirPlay, bluetoothOption])
             try session.setActive(true, options: [])
         } catch {
             NSLog("Failed to configure AVAudioSession: \(error)")
