@@ -94,7 +94,12 @@ final class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate
         mainWebView.allowsBackForwardNavigationGestures = false
         mainWebView.scrollView.bounces = false
         mainWebView.scrollView.contentInsetAdjustmentBehavior = .never
-        mainWebView.isInspectable = true  // iOS 16.4+ でのみ有効。debug 用
+        // WKWebView.isInspectable は iOS 16.4+ でのみ利用可能。
+        // deployment target は iOS 15.0 なので #available で囲む。
+        // Safari Web Inspector 越しの debug 用なので、無くても production は動く。
+        if #available(iOS 16.4, *) {
+            mainWebView.isInspectable = true
+        }
 
         view.addSubview(mainWebView)
         NSLayoutConstraint.activate([
