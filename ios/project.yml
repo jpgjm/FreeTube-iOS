@@ -1,0 +1,119 @@
+# xcodegen 用プロジェクト定義。
+# CI で `xcodegen generate` を叩くと FreeTube.xcodeproj が生成される。
+# したがって *.xcodeproj / *.xcworkspace はコミット不要。
+#
+# ビルド構成:
+#   - ターゲット `FreeTube`: WKWebView 型のシングル画面 UIKit アプリ。
+#     www/ 以下 (webpack が生成) を bundle resource として組み込み、
+#     `file:///.../www/index.html` を読み込む。
+#   - コード署名は CI 上で無効 (未署名 IPA を artifact として吐き出す)。
+#
+# iOS Deployment Target: WKWebView + AVAudioSession の要件を満たすなら
+# 15.0 で十分。参考プロジェクト vivi_music_ios と一致。
+
+name: FreeTube
+
+options:
+  bundleIdPrefix: io.freetubeapp
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.10"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGNING_ALLOWED: NO
+    CODE_SIGN_IDENTITY: ""
+    # 非署名ビルドで dyld 実行時警告を減らす
+    ENABLE_BITCODE: NO
+    # WKWebView からローカル file:// を読む際に必要な設定は Info.plist 側で対応
+
+targets:
+  FreeTube:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      # メインの Swift ソースと bridge.js を含む。
+      # www/ は下の folder reference で別途 bundle root にコピーするので、
+      # ここでは exclude して二重追加を防ぐ。
+      - path: App/App
+        excludes:
+          - "**/*.md"
+          - "www"
+          - "www/**"
+          - "Info.plist"
+          - "Assets.xcassets"
+          - "Assets.xcassets/**"
+      # bridge.js は WKUserScript から `Bundle.main.url(forResource: subdirectory:)`
+      # で取得するので、Bundle 内の `JavaScript/bridge.js` に配置する必要がある。
+      # 上の `App/App` から自動的に Copy Bundle Resources に入る想定だが、
+      # 念のため明示。
+      - path: App/App/JavaScript/bridge.js
+        buildPhase: resources
+      # www/ (webpack が index.html, main.js, static/... を書き出す)
+      # を Xcode に「フォルダリファレンス (blue folder)」として渡し、
+      # ディレクトリ構造を保ったまま bundle にコピーさせる。
+      - path: App/App/www
+        type: folder
+        buildPhase: resources
+    resources:
+      - path: App/App/Assets.xcassets
+    info:
+      path: App/App/Info.plist
+      properties:
+        CFBundleDisplayName: FreeTube
+        CFBundleShortVersionString: "0.24.0"
+        CFBundleVersion: "1"
+
+        # WKWebView + AVAudioSession によるバックグラウンド再生に必須
+        UIBackgroundModes:
+          - audio
+          - fetch
+
+        # WKWebView が YouTube CDN 等の HTTPS のみでなく Invidious インスタンス
+        # (自己署名の可能性もある) を叩けるようにする保険
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+
+        # UIDocumentPickerViewController でユーザが端末上のファイルにアクセス
+        # する時の表示。設定のバックアップ/リストア用。
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+
+        # 画面向き
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        "UISupportedInterfaceOrientations~ipad":
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+
+        # ホームインジケータ / ステータスバーを WebView 側で塗るための土台
+        UIViewControllerBasedStatusBarAppearance: true
+
+        # YouTube 系ディープリンク (m.youtube.com など) を FreeTube で開く
+        # 実装は SceneDelegate.scene(_:openURLContexts:) 側
+        CFBundleURLTypes:
+          - CFBundleURLSchemes:
+              - "freetube"
+            CFBundleURLName: "io.freetubeapp.freetube.deeplink"
+
+        # マイクやカメラは不要
+        # UILaunchStoryboardName は使わず、SwiftUI の LaunchScreen 情報を Info.plist に直書き
+        UILaunchScreen:
+          UIColorName: ""
+
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.freetubeapp.freetube
+        PRODUCT_NAME: FreeTube
+        TARGETED_DEVICE_FAMILY: "1,2"  # iPhone + iPad
+        # www/ 以下を bundle root にコピーするための設定
+        # (xcodegen の type: folder + buildPhase: resources により対応済み)

@@ -1,0 +1,162 @@
+name: Build iOS IPA
+
+# -----------------------------------------------------------------------------
+# FreeTube iOS 版の GitHub Actions ワークフロー。
+# 参考: AlarmClock の build-ipa.yml (XcodeGen + xcodebuild, 非署名 IPA)
+#
+# フロー:
+#   1. Node.js 環境で FreeTube の Vue アプリを webpack ビルド
+#      → `ios/App/App/www/` に成果物が生成される
+#   2. brew で xcodegen を入れる
+#   3. `xcodegen generate` で FreeTube.xcodeproj を生成
+#   4. `xcodebuild` で Release / iphoneos / 非署名ビルド
+#   5. .app を Payload/ でラップして zip 化 → freetube.ipa
+#   6. artifact として upload
+# -----------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main, development]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # -------- Xcode --------
+      # AlarmClock と違い FreeTube は iOS 15+ で動くので Xcode 26 まで要求しない。
+      # macos-latest ランナー同梱の最新 Xcode を採用する。
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      # -------- Node.js + yarn (FreeTube 標準) --------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'yarn'
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      # -------- webpack で Vue app を www/ にビルド --------
+      - name: Build web assets (ios)
+        run: yarn run pack:ios
+
+      - name: Show www/ contents
+        run: |
+          echo "=== ios/App/App/www ==="
+          ls -la ios/App/App/www | head -30
+          echo "=== index.html head ==="
+          head -20 ios/App/App/www/index.html || true
+
+      # -------- xcodegen で xcodeproj 生成 --------
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: |
+          cd ios
+          xcodegen generate
+          ls -la
+          test -d FreeTube.xcodeproj && echo "OK" || (echo "xcodeproj not generated"; exit 1)
+
+      # -------- xcodebuild (非署名) --------
+      - name: Build (no codesign)
+        run: |
+          set -o pipefail
+          cd ios
+          xcodebuild \
+            -project FreeTube.xcodeproj \
+            -scheme FreeTube \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            2>&1 | tee /tmp/xcodebuild.log
+
+      - name: Show build log tail
+        if: always()
+        run: |
+          echo "=== Last 200 lines of xcodebuild log ==="
+          tail -200 /tmp/xcodebuild.log || true
+
+      - name: Upload xcodebuild log (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: /tmp/xcodebuild.log
+          if-no-files-found: warn
+
+      # -------- .app 検証 --------
+      - name: Locate .app and verify binary
+        id: locate
+        run: |
+          cd ios
+          echo "=== find results ==="
+          find build -name "FreeTube.app" -type d
+
+          APP=$(find build -name "FreeTube.app" -type d | head -1)
+          if [ -z "$APP" ] || [ ! -d "$APP" ]; then
+            echo "::error::FreeTube.app が見つかりません"
+            find build -maxdepth 6 -name "*.app" -type d || true
+            exit 1
+          fi
+
+          echo "=== Using: $APP ==="
+          ls -la "$APP"
+          echo "Total size: $(du -sh "$APP" | cut -f1)"
+
+          if [ ! -f "$APP/FreeTube" ]; then
+            echo "::error::FreeTube 実行ファイルが .app 内にない (コンパイル/リンク失敗の可能性)"
+            ls -la "$APP"
+            exit 1
+          fi
+
+          BIN_SIZE=$(stat -f %z "$APP/FreeTube" 2>/dev/null || stat -c %s "$APP/FreeTube")
+          echo "FreeTube binary size: $BIN_SIZE bytes"
+          file "$APP/FreeTube" || true
+
+          if [ "$BIN_SIZE" -lt 10000 ]; then
+            echo "::error::FreeTube binary is essentially empty ($BIN_SIZE bytes)"
+            exit 1
+          fi
+
+          # www/ が bundle に入っているか確認
+          if [ ! -f "$APP/www/index.html" ]; then
+            echo "::error::www/index.html が .app 内に含まれていません"
+            echo "--- .app contents ---"
+            ls -la "$APP"
+            exit 1
+          fi
+          echo "www/ present"
+
+          # ios/ から見た相対パスを絶対に直しておく
+          ABS_APP="$(cd "$(dirname "$APP")" && pwd)/$(basename "$APP")"
+          echo "app_path=$ABS_APP" >> "$GITHUB_OUTPUT"
+
+      # -------- IPA パッケージ --------
+      - name: Package IPA
+        run: |
+          mkdir -p dist Payload
+          cp -R "${{ steps.locate.outputs.app_path }}" Payload/
+          zip -r dist/freetube.ipa Payload
+          rm -rf Payload
+          echo "=== IPA info ==="
+          ls -lh dist/freetube.ipa
+          unzip -l dist/freetube.ipa | tail -3
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: freetube-ios-ipa
+          path: dist/freetube.ipa

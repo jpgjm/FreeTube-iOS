@@ -1,0 +1,87 @@
+// -----------------------------------------------------------------------------
+// iOS 版 ファイルダイアログブリッジ。
+//
+// Swift 側 (`FreeTubeJavaScriptInterface.swift`) では以下にマップされる:
+//   - requestSaveDialog → UIDocumentPickerViewController(forExporting:)
+//   - requestOpenDialog → UIDocumentPickerViewController(forOpeningContentTypes:)
+//
+// レスポンス形式は Android と同一 (JSON 文字列で uri/type/fileName を返す)。
+// -----------------------------------------------------------------------------
+
+import android from 'android'
+import { awaitAsyncResult } from './jsinterface'
+import { readFile } from './storage'
+
+export const MIME_TYPES = {
+  db: 'application/octet-stream',
+  json: 'application/json',
+  csv: 'text/comma-separated-values',
+  opml: 'application/octet-stream',
+  xml: 'text/xml'
+}
+export const FILE_TYPES = Object.fromEntries(Object.entries(MIME_TYPES).map(([key, value]) => [value, key]))
+
+/**
+ * @typedef SaveDialogResponse
+ * @property {boolean} canceled
+ * @property {'SUCCESS'|'USER_CANCELED'} type
+ * @property {string?} uri
+ * @property {string?} name
+ * @property {Function?} text
+ */
+
+/**
+ * Handles the response of a `requestDialog` function from the bridge
+ * @param {string} promiseId
+ * @returns {Promise<SaveDialogResponse>} either a uri based on the user's input or a cancelled response
+ */
+async function handleDialogResponse(promiseId) {
+  let response = await awaitAsyncResult(promiseId)
+  if (response === 'USER_CANCELED') {
+    return {
+      canceled: true,
+      type: 'USER_CANCELED',
+      uri: null,
+      name: null,
+      text: null
+    }
+  } else {
+    response = JSON.parse(response)
+    let typedUri = response?.uri
+    if (response?.type in FILE_TYPES) {
+      typedUri = `${typedUri}.${FILE_TYPES[response?.type]}`
+    }
+    return {
+      canceled: false,
+      type: 'SUCCESS',
+      uri: response.uri,
+      name: response.fileName,
+      async text() {
+        return await readFile(response.uri)
+      }
+    }
+  }
+}
+
+/**
+ * Requests a save file dialog
+ * @param {string} fileName name of requested file
+ * @param {string} fileType mime type
+ * @returns {Promise<SaveDialogResponse>} either a uri based on the user's input or a cancelled response
+ */
+export function requestSaveDialog(fileName, fileType) {
+  const promiseId = android.requestSaveDialog(fileName, fileType)
+  return handleDialogResponse(promiseId)
+}
+
+/**
+ * Requests an open file dialog
+ * @param {string[]} fileTypes mime type of acceptable inputs
+ * @returns {Promise<SaveDialogResponse>} either a uri based on the user's input or a cancelled response
+ */
+export function requestOpenDialog(fileTypes) {
+  const types = Array.from(new Set(fileTypes.map((type) => type in MIME_TYPES ? MIME_TYPES[type] : type)))
+
+  const promiseId = android.requestOpenDialog(types.join(','))
+  return handleDialogResponse(promiseId)
+}
