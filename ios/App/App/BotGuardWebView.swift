@@ -88,9 +88,11 @@ final class BotGuardWebView: WKWebView {
 
     private func loadHostHTML() {
         // botGuardScript.js は Bundle の www/ 配下にコピーされている。
-        // それを <script> として読ませるだけのミニマル HTML を組み立てる。
-        guard let wwwDir = Bundle.main.url(forResource: "www", withExtension: nil) else {
-            NSLog("[BotGuard] www/ が Bundle にない — PoToken 生成不可")
+        // ViewController と同じ理由で Bundle.main.url は使わず bundleURL
+        // 直下を決め打ちする。
+        let wwwDir = Bundle.main.bundleURL.appendingPathComponent("www")
+        guard FileManager.default.fileExists(atPath: wwwDir.path) else {
+            NSLog("[BotGuard] www/ が Bundle にない — PoToken 生成不可 (\(wwwDir.path))")
             return
         }
         // botGuardScript.js が入っているファイル名は webpack.botGuardScript.config.js
