@@ -33,8 +33,19 @@ final class FreeTubeJavaScriptInterface: NSObject, WKScriptMessageHandler,
     private let botGuardProvider: () -> BotGuardWebView?
     private let sigProvider: () -> SigWebView?
 
-    /// ドキュメントピッカーの callback 待ち (uuid → promise id)
-    private var pendingPickers: [String: (kind: PickerKind, promiseId: String)] = [:]
+    /// ドキュメントピッカーの callback 待ち。
+    /// キーは `ObjectIdentifier(picker)` で picker インスタンス自身を識別する
+    /// (UIDocumentPickerViewController は UIViewController なので UIView 系の
+    /// `accessibilityIdentifier` は持たないため、その代替として使う)。
+    /// 値には picker 自身への強参照も含めて保持する — controller を present した
+    /// あと、その controller への強参照がどこにも無いと ARC で解放され得るため。
+    private var pendingPickers: [ObjectIdentifier: PendingPicker] = [:]
+
+    private struct PendingPicker {
+        let picker: UIDocumentPickerViewController
+        let kind: PickerKind
+        let promiseId: String
+    }
 
     private enum PickerKind {
         case save(fileName: String, mime: String)
@@ -316,9 +327,11 @@ final class FreeTubeJavaScriptInterface: NSObject, WKScriptMessageHandler,
             }
             let picker = UIDocumentPickerViewController(forExporting: [tmpFile], asCopy: false)
             picker.delegate = self
-            let key = UUID().uuidString
-            picker.accessibilityIdentifier = key
-            self.pendingPickers[key] = (.save(fileName: fileName, mime: mime), promiseId)
+            self.pendingPickers[ObjectIdentifier(picker)] = PendingPicker(
+                picker: picker,
+                kind: .save(fileName: fileName, mime: mime),
+                promiseId: promiseId
+            )
             presenter.present(picker, animated: true)
         }
     }
@@ -332,9 +345,11 @@ final class FreeTubeJavaScriptInterface: NSObject, WKScriptMessageHandler,
             let picker = UIDocumentPickerViewController(forOpeningContentTypes: types.isEmpty ? [.data] : types,
                                                         asCopy: true)
             picker.delegate = self
-            let key = UUID().uuidString
-            picker.accessibilityIdentifier = key
-            self.pendingPickers[key] = (.open(mimes: mimes), promiseId)
+            self.pendingPickers[ObjectIdentifier(picker)] = PendingPicker(
+                picker: picker,
+                kind: .open(mimes: mimes),
+                promiseId: promiseId
+            )
             presenter.present(picker, animated: true)
         }
     }
@@ -344,9 +359,11 @@ final class FreeTubeJavaScriptInterface: NSObject, WKScriptMessageHandler,
             guard let self = self, let presenter = self.presenter else { return }
             let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder])
             picker.delegate = self
-            let key = UUID().uuidString
-            picker.accessibilityIdentifier = key
-            self.pendingPickers[key] = (.directory, promiseId)
+            self.pendingPickers[ObjectIdentifier(picker)] = PendingPicker(
+                picker: picker,
+                kind: .directory,
+                promiseId: promiseId
+            )
             presenter.present(picker, animated: true)
         }
     }
@@ -355,8 +372,7 @@ final class FreeTubeJavaScriptInterface: NSObject, WKScriptMessageHandler,
 
     func documentPicker(_ controller: UIDocumentPickerViewController,
                         didPickDocumentsAt urls: [URL]) {
-        guard let key = controller.accessibilityIdentifier,
-              let ctx = pendingPickers.removeValue(forKey: key) else { return }
+        guard let ctx = pendingPickers.removeValue(forKey: ObjectIdentifier(controller)) else { return }
         guard let url = urls.first else {
             communicator.reject(ctx.promiseId, error: "no file selected")
             return
@@ -391,8 +407,7 @@ final class FreeTubeJavaScriptInterface: NSObject, WKScriptMessageHandler,
     }
 
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-        guard let key = controller.accessibilityIdentifier,
-              let ctx = pendingPickers.removeValue(forKey: key) else { return }
+        guard let ctx = pendingPickers.removeValue(forKey: ObjectIdentifier(controller)) else { return }
         communicator.resolve(ctx.promiseId, value: "USER_CANCELED")
     }
 }
