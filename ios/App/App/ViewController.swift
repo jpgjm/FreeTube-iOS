@@ -41,6 +41,7 @@ final class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate
         setupHiddenWebViews()
         loadIndex()
         setupLifecycleObservers()
+        setupDiagnosticOverlay()
     }
 
     override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
@@ -225,6 +226,122 @@ final class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate
 
     // MARK: - 診断表示
 
+    // MARK: - 常時ステータスオーバーレイ
+
+    /// 画面上部に常時表示する半透明の診断バー。
+    /// 起動後 30 秒間は 500ms 間隔で内容を更新し、それ以降は
+    /// 3本指タップで再表示できる。真っ黒画面の原因追跡用。
+    private var diagOverlay: UILabel?
+    private var diagTimer: Timer?
+    private var diagStartAt: Date?
+
+    private func setupDiagnosticOverlay() {
+        let label = UILabel()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.numberOfLines = 0
+        label.textColor = .white
+        label.backgroundColor = UIColor(white: 0.0, alpha: 0.75)
+        label.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+        label.textAlignment = .left
+        label.lineBreakMode = .byWordWrapping
+        view.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 4),
+            label.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -4),
+            label.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 4)
+        ])
+        diagOverlay = label
+        diagStartAt = Date()
+
+        // 3本指タップで再表示 (UI が上がった後に消えたのを見返す用)
+        let tap = UITapGestureRecognizer(target: self, action: #selector(reshowDiagnostics))
+        tap.numberOfTouchesRequired = 3
+        view.addGestureRecognizer(tap)
+
+        // 500ms ごとに情報を書き換える。30 秒経ったら停止&自動フェード。
+        diagTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.updateDiagnostics()
+        }
+        updateDiagnostics()
+    }
+
+    @objc private func reshowDiagnostics() {
+        diagStartAt = Date()
+        diagOverlay?.alpha = 1
+        diagTimer?.invalidate()
+        diagTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.updateDiagnostics()
+        }
+        updateDiagnostics()
+    }
+
+    private func updateDiagnostics() {
+        guard let overlay = diagOverlay else { return }
+        let elapsed = Date().timeIntervalSince(diagStartAt ?? Date())
+        if elapsed > 30 {
+            diagTimer?.invalidate(); diagTimer = nil
+            UIView.animate(withDuration: 1.0) { overlay.alpha = 0 }
+            return
+        }
+        // JS 側の _health と最新ログを取り出す
+        let js = """
+            (function(){
+              var out = { url: (location && location.href) || '',
+                          docState: (document && document.readyState) || '?',
+                          bodyBg: '',
+                          bodyHTMLLen: 0 };
+              try { out.bodyBg = document.body && getComputedStyle(document.body).backgroundColor; } catch(e) {}
+              try { out.bodyHTMLLen = (document.body && document.body.innerHTML.length) || 0; } catch(e) {}
+              if (window.Android && window.Android._health) {
+                out.h = window.Android._health;
+              } else {
+                out.h = null;
+              }
+              if (window.Android && window.Android._logs) {
+                var logs = window.Android._logs.slice(-3);
+                out.logs = logs.map(function(l){
+                  return '['+ l.level + '] ' + String(l.message).slice(0, 200);
+                });
+              } else {
+                out.logs = [];
+              }
+              return JSON.stringify(out);
+            })();
+            """
+        mainWebView?.evaluateJavaScript(js) { [weak self] result, err in
+            guard let self = self else { return }
+            var text = "FreeTube iOS diag (elapsed=\(Int(elapsed))s, 3-finger tap: reshow)"
+            if let err = err {
+                text += "\nevalJS err: \(err.localizedDescription)"
+            } else if let s = result as? String, let data = s.data(using: .utf8),
+                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                let url = (obj["url"] as? String) ?? "?"
+                let docState = (obj["docState"] as? String) ?? "?"
+                let bodyBg = (obj["bodyBg"] as? String) ?? "?"
+                let bodyLen = (obj["bodyHTMLLen"] as? Int) ?? 0
+                text += "\nurl: \(url.suffix(60))"
+                text += "\ndoc: \(docState)  body.bg: \(bodyBg)  body.htmlLen: \(bodyLen)"
+                if let h = obj["h"] as? [String: Any] {
+                    let post = (h["postCount"] as? Int) ?? 0
+                    let resolve = (h["resolveCount"] as? Int) ?? 0
+                    let lastPost = (h["lastPostName"] as? String) ?? "(none)"
+                    let hasHandler = (h["webkitHandlerAvailable"] as? Bool) ?? false
+                    let firstErr = (h["firstError"] as? String) ?? ""
+                    text += "\nbridge: post=\(post) resolve=\(resolve) handler=\(hasHandler) lastPost=\(lastPost)"
+                    if !firstErr.isEmpty { text += "\nfirstErr: \(firstErr.prefix(200))" }
+                } else {
+                    text += "\nbridge: (Android未定義)"
+                }
+                if let logs = obj["logs"] as? [String], !logs.isEmpty {
+                    text += "\nlogs:\n" + logs.joined(separator: "\n")
+                }
+            } else {
+                text += "\n(evalJS returned non-string result)"
+            }
+            overlay.text = text
+        }
+    }
+
     /// setupWebView / loadIndex で見つけた不整合を溜めておくバッファ。
     /// showLoadErrorsOnScreen で UILabel に流し込む。
     private var loadErrors: [String] = []
@@ -248,7 +365,8 @@ final class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate
                 NSLayoutConstraint.activate([
                     label.leadingAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.leadingAnchor, constant: 8),
                     label.trailingAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.trailingAnchor, constant: -8),
-                    label.topAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.topAnchor, constant: 8)
+                    // 診断オーバーレイの下に配置する
+                    label.topAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.topAnchor, constant: 180)
                 ])
                 self.errorLabel = label
             }

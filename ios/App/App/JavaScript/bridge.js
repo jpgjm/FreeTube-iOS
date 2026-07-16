@@ -34,11 +34,17 @@
   // `webkit.messageHandlers.freetube` は ViewController の初期化時に
   // `WKUserContentController.add(_:name:)` で登録される。
   function postToNative(payload) {
+    _health.postCount += 1;
+    _health.lastPostAt = Date.now();
+    _health.lastPostName = payload && payload.name;
     try {
       window.webkit.messageHandlers.freetube.postMessage(payload);
     } catch (e) {
       // Swift bridge が未登録 (Web preview 等) の場合はコンソールに出して握りつぶす
-      console.error('[FreeTubeBridge] postToNative failed:', e, payload);
+      console.error('[FreeTubeBridge] postToNative failed:', e && e.message ? e.message : e, JSON.stringify(payload));
+      if (!_health.firstError) {
+        _health.firstError = 'postToNative: ' + (e && e.message ? e.message : String(e));
+      }
     }
   }
 
@@ -80,6 +86,30 @@
 
   var _results = new Map();
   var _logs = [];
+
+  // ---- 診断用: bridge の健全性を1つのオブジェクトに集約 -----------
+  //   (診断オーバーレイからここを覗いて何が起きてるか見る)
+  var _health = {
+    scriptStart: Date.now(),
+    scriptEnd: null,
+    postCount: 0,
+    lastPostAt: null,
+    lastPostName: null,
+    resolveCount: 0,
+    lastResolveAt: null,
+    webkitHandlerAvailable: false,
+    androidBridgeAvailable: false,
+    firstError: null
+  };
+
+  function checkWebkitHandler() {
+    try {
+      _health.webkitHandlerAvailable =
+        !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.freetube);
+    } catch (e) { _health.webkitHandlerAvailable = false; }
+    return _health.webkitHandlerAvailable;
+  }
+  checkWebkitHandler();
 
   var bridge = {
     __isFreeTubeIOSBridge: true,
@@ -204,4 +234,43 @@
   console.log   = function () { record('log',   arguments); origLog.apply(null, arguments); };
   console.warn  = function () { record('warn',  arguments); origWarn.apply(null, arguments); };
   console.error = function () { record('error', arguments); origError.apply(null, arguments); };
+
+  // ---- 未処理エラーの補足 -----------------------------------------------
+  // Vue 起動時に throw されたエラー、Promise の unhandled rejection を
+  // 全て _logs に記録する。診断オーバーレイでここが見えれば、なぜ画面が
+  // 真っ黒なのかが特定できる。
+  window.addEventListener('error', function (ev) {
+    try {
+      var msg = 'window.onerror: ' + (ev.message || 'unknown')
+              + ' @ ' + (ev.filename || '?') + ':' + (ev.lineno || '?') + ':' + (ev.colno || '?');
+      if (ev.error && ev.error.stack) { msg += '\n' + ev.error.stack; }
+      _logs.push({ level: 'error', time: Date.now(), message: msg });
+      if (!_health.firstError) { _health.firstError = msg.split('\n')[0]; }
+    } catch (e) { /* noop */ }
+  }, true);
+  window.addEventListener('unhandledrejection', function (ev) {
+    try {
+      var reason = ev.reason;
+      var msg = 'unhandledrejection: '
+              + (reason && reason.message ? reason.message :
+                 (typeof reason === 'string' ? reason : JSON.stringify(reason)));
+      if (reason && reason.stack) { msg += '\n' + reason.stack; }
+      _logs.push({ level: 'error', time: Date.now(), message: msg });
+      if (!_health.firstError) { _health.firstError = msg.split('\n')[0]; }
+    } catch (e) { /* noop */ }
+  });
+
+  // ---- bridge の存在ロギング --------------------------------------------
+  // Swift 側の診断オーバーレイが `_health` を評価するために、初期化完了時刻を
+  // 記録し、bridge が生きていることをログに残す。
+  _health.androidBridgeAvailable = true;
+  _health.scriptEnd = Date.now();
+  _logs.push({
+    level: 'log',
+    time: Date.now(),
+    message: 'bridge.js loaded (webkitHandler=' + _health.webkitHandlerAvailable + ')'
+  });
+
+  // bridge を最後に公開 (Swift 側からのメッセージ受信より先に定義するため)
+  bridge._health = _health;
 })();

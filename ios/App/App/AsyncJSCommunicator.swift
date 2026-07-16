@@ -85,6 +85,10 @@ final class AsyncJSCommunicator {
               try {
                 if (!window.Android) { console.error('Android bridge missing'); return; }
                 window.Android._results.set(\(quote(promiseId)), \(jsonValue));
+                if (window.Android._health) {
+                  window.Android._health.resolveCount = (window.Android._health.resolveCount || 0) + 1;
+                  window.Android._health.lastResolveAt = Date.now();
+                }
                 window.dispatchEvent(new Event(\(quote(promiseId + "-" + kind))));
               } catch(e) { console.error('dispatch bridge failed', e); }
             })();
