@@ -48,10 +48,13 @@ targets:
           - "Info.plist"
           - "Assets.xcassets"
           - "Assets.xcassets/**"
-      # bridge.js は WKUserScript から `Bundle.main.url(forResource: subdirectory:)`
-      # で取得するので、Bundle 内の `JavaScript/bridge.js` に配置する必要がある。
-      # 上の `App/App` から自動的に Copy Bundle Resources に入る想定だが、
-      # 念のため明示。
+      # bridge.js は WKUserScript から Swift 側で読み込む。
+      # Xcode の Copy Bundle Resources に個別ファイルを追加すると
+      # サブディレクトリ構造は保持されず**バンドルルートに flatten される**
+      # (`FreeTube.app/bridge.js` に置かれる)。ViewController.swift 側は
+      # まずバンドルルート、次に `JavaScript/bridge.js` の順で探すよう
+      # 修正済みなので、この項目はどちらでも動くが、実質的にはルートに
+      # コピーされる想定と考えて OK。
       - path: App/App/JavaScript/bridge.js
         buildPhase: resources
       # www/ (webpack が index.html, main.js, static/... を書き出す)
