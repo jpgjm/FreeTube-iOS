@@ -26,6 +26,15 @@ csak-timelog.json
 .idea/
 debug/
 assets/
+# --- iOSフォーク側の追加 ---
+# 上の `assets/` はビルド成果物(dist/electron/assets 等)を対象にしたつもりだが、
+# ディレクトリパス指定が緩く、Vueコンポーネントが import する
+# `src/renderer/assets/`(fontや画像などのソースアセット)も一緒に除外されてしまう。
+# そのままだと初回 git push でこれらのアセットが GitHub に上がらず、
+# CI 側の webpack ビルドで `Can't resolve '../../assets/img/...'` になる。
+# 明示的に負パターンで復活させる。
+!/src/renderer/assets/
+!/src/renderer/assets/**
 # Lefthook
 lefthook-local.yml
 *.bak
