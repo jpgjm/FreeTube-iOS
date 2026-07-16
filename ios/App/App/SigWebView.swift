@@ -87,15 +87,18 @@ final class SigWebView: WKWebView {
     // MARK: - decipher.html ロード
 
     private func loadDecipherHTML() {
-        guard let wwwDir = Bundle.main.url(forResource: "www", withExtension: nil) else {
-            NSLog("[Sig] www/ が Bundle にない")
+        // ViewController と同じ理由で Bundle.main.url は使わず bundleURL
+        // 直下を決め打ちする。
+        let wwwDir = Bundle.main.bundleURL.appendingPathComponent("www")
+        guard FileManager.default.fileExists(atPath: wwwDir.path) else {
+            NSLog("[Sig] www/ が Bundle にない (\(wwwDir.path))")
             return
         }
         let decipher = wwwDir.appendingPathComponent("decipher.html")
         if FileManager.default.fileExists(atPath: decipher.path) {
             loadFileURL(decipher, allowingReadAccessTo: wwwDir)
         } else {
-            NSLog("[Sig] decipher.html が見つからない")
+            NSLog("[Sig] decipher.html が見つからない (\(decipher.path))")
         }
     }
 }
