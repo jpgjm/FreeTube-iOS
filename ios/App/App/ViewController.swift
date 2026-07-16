@@ -70,17 +70,46 @@ final class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate
 
         let userController = WKUserContentController()
 
+        // -----------------------------------------------------------------
         // JS Bridge 注入 (document-start)
-        if let bridgeURL = Bundle.main.url(forResource: "bridge",
-                                           withExtension: "js",
-                                           subdirectory: "JavaScript"),
-           let bridgeJS = try? String(contentsOf: bridgeURL, encoding: .utf8) {
+        //
+        // 注意: bridge.js は project.yml で `path: App/App/JavaScript/bridge.js`
+        // として resources に個別追加されているが、Xcode の Copy Bundle
+        // Resources は**サブディレクトリ構造を保持せず**バンドルルートに
+        // flatten する。したがって実行時のパスは
+        //   `FreeTube.app/bridge.js`
+        // であって `FreeTube.app/JavaScript/bridge.js` ではない。
+        //
+        // 過去の実装では `Bundle.main.url(forResource:withExtension:subdirectory:)`
+        // で "JavaScript" を指定していたが、それだと flatten の結果と食い違い
+        // 常に nil が返り、bridge.js が注入されず window.Android が未定義に
+        // なって Vue app 起動時にエラーで真っ黒画面になっていた。
+        //
+        // ここではフォールバックを 2 段用意し、まず期待通りサブディレクトリで
+        // 見つかるならそれを使い、無ければバンドルルート直下を試す。
+        // -----------------------------------------------------------------
+        let bridgeCandidateURLs: [URL] = [
+            Bundle.main.bundleURL.appendingPathComponent("bridge.js"),
+            Bundle.main.bundleURL.appendingPathComponent("JavaScript/bridge.js")
+        ]
+        var bridgeJS: String? = nil
+        var bridgeFoundAt: URL? = nil
+        for candidate in bridgeCandidateURLs {
+            if let s = try? String(contentsOf: candidate, encoding: .utf8) {
+                bridgeJS = s
+                bridgeFoundAt = candidate
+                break
+            }
+        }
+        if let bridgeJS = bridgeJS {
+            NSLog("[FreeTube] bridge.js loaded from \(bridgeFoundAt?.path ?? "?")")
             let userScript = WKUserScript(source: bridgeJS,
                                           injectionTime: .atDocumentStart,
                                           forMainFrameOnly: true)
             userController.addUserScript(userScript)
         } else {
             NSLog("[FreeTube] bridge.js が見つからない — JS 側ブリッジは動作しない")
+            self.loadErrors.append("bridge.js not found in bundle")
         }
 
         // JS → Swift の messageHandler。名前は bridge.js の
@@ -155,15 +184,79 @@ final class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate
     }
 
     private func loadIndex() {
-        // Bundle 内の www/index.html を読み込む。file:// で読み込むためには
-        // allowingReadAccessTo に上位ディレクトリを渡して WebView にファイル
-        // 参照権限を与える必要がある。
-        guard let wwwDir = Bundle.main.url(forResource: "www", withExtension: nil) else {
-            NSLog("[FreeTube] www/ ディレクトリが Bundle に見つからない")
+        // -----------------------------------------------------------------
+        // Bundle 内の www/index.html を読み込む。
+        //
+        // 注意: 過去実装では `Bundle.main.url(forResource: "www", withExtension: nil)`
+        // を使っていたが、この API はファイル資源を探すためのもので、blue
+        // folder reference (project.yml で `type: folder`) に対しては nil を
+        // 返すことがある。ここでは Bundle.bundleURL 直下に `www/` があると
+        // 決め打ちし、直接パス構築する (project.yml で folder reference を
+        // 使っているので `FreeTube.app/www/` は必ずこの位置になる)。
+        //
+        // 診断のため、失敗時は画面上に赤い UILabel でエラーを表示する。
+        // (サイドロード環境ではコンソールログを取れないため。)
+        // -----------------------------------------------------------------
+        let wwwDir = Bundle.main.bundleURL.appendingPathComponent("www")
+        guard FileManager.default.fileExists(atPath: wwwDir.path) else {
+            let msg = "www/ ディレクトリが Bundle にない: \(wwwDir.path)"
+            NSLog("[FreeTube] \(msg)")
+            loadErrors.append(msg)
+            showLoadErrorsOnScreen()
             return
         }
         let index = wwwDir.appendingPathComponent("index.html")
+        guard FileManager.default.fileExists(atPath: index.path) else {
+            let msg = "index.html が Bundle にない: \(index.path)"
+            NSLog("[FreeTube] \(msg)")
+            loadErrors.append(msg)
+            // 参考のため、www/ に何が入っているかをログとエラー表示に含める
+            if let items = try? FileManager.default.contentsOfDirectory(atPath: wwwDir.path) {
+                let listed = items.prefix(20).joined(separator: ", ")
+                NSLog("[FreeTube] www/ 実際の内容: \(listed)")
+                loadErrors.append("www/ 実際の内容 (先頭20件): \(listed)")
+            }
+            showLoadErrorsOnScreen()
+            return
+        }
+        NSLog("[FreeTube] loading \(index.path)")
         mainWebView.loadFileURL(index, allowingReadAccessTo: wwwDir)
+    }
+
+    // MARK: - 診断表示
+
+    /// setupWebView / loadIndex で見つけた不整合を溜めておくバッファ。
+    /// showLoadErrorsOnScreen で UILabel に流し込む。
+    private var loadErrors: [String] = []
+    private var errorLabel: UILabel?
+
+    /// サイドロード環境向けのオンスクリーン診断表示。
+    /// WebView が真っ黒になった時、何が起きているかをユーザに見せる。
+    private func showLoadErrorsOnScreen() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if self.errorLabel == nil {
+                let label = UILabel()
+                label.translatesAutoresizingMaskIntoConstraints = false
+                label.numberOfLines = 0
+                label.textColor = .white
+                label.backgroundColor = UIColor.red.withAlphaComponent(0.85)
+                label.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+                label.textAlignment = .left
+                label.lineBreakMode = .byWordWrapping
+                self.view.addSubview(label)
+                NSLayoutConstraint.activate([
+                    label.leadingAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.leadingAnchor, constant: 8),
+                    label.trailingAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.trailingAnchor, constant: -8),
+                    label.topAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.topAnchor, constant: 8)
+                ])
+                self.errorLabel = label
+            }
+            let body = self.loadErrors.enumerated()
+                .map { "[\($0.offset + 1)] \($0.element)" }
+                .joined(separator: "\n")
+            self.errorLabel?.text = "FreeTube iOS 起動時エラー\n\n\(body)"
+        }
     }
 
     private func setupLifecycleObservers() {
@@ -227,5 +320,52 @@ final class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate
             UIApplication.shared.open(url, options: [:], completionHandler: nil)
         }
         return nil
+    }
+
+    // MARK: - WKNavigationDelegate: 読み込み結果の可視化
+
+    /// index.html までは辿り着いたが、その先の遷移(内部ナビゲーション)で失敗
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        let msg = "WKWebView didFail: \(error.localizedDescription)"
+        NSLog("[FreeTube] \(msg)")
+        loadErrors.append(msg)
+        showLoadErrorsOnScreen()
+    }
+
+    /// index.html を開くリクエスト自体が失敗したケース
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        let msg = "WKWebView didFailProvisionalNavigation: \(error.localizedDescription)"
+        NSLog("[FreeTube] \(msg)")
+        loadErrors.append(msg)
+        showLoadErrorsOnScreen()
+    }
+
+    /// 通常時の成功ログ (診断用)
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        NSLog("[FreeTube] WKWebView didFinish: \(webView.url?.absoluteString ?? "(nil url)")")
+        // ここまで来て真っ黒なら JS 側で例外が起きている可能性が高い。
+        // WebView 内 console.error を吸い上げるため、bridge.js が
+        // console 系を _logs に貯めているのを起動 5 秒後に画面表示に流す。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+            self?.dumpJSLogsIfBlank()
+        }
+    }
+
+    /// 起動5秒後にまだ何も見えない (視覚的に黒) 場合、JS 側のログを
+    /// 引き出して画面に表示する。真っ黒の原因が JS 例外なら、ここで
+    /// エラースタックが見える。
+    private func dumpJSLogsIfBlank() {
+        mainWebView.evaluateJavaScript("(window.Android && window.Android._logs) ? JSON.stringify(window.Android._logs.slice(-30)) : 'no logs'") { [weak self] result, err in
+            guard let self = self else { return }
+            if let err = err {
+                self.loadErrors.append("evalJS logs failed: \(err.localizedDescription)")
+                self.showLoadErrorsOnScreen()
+                return
+            }
+            if let s = result as? String, s != "no logs" && s != "[]" {
+                self.loadErrors.append("JS console (last 30): \(s.prefix(1200))")
+                self.showLoadErrorsOnScreen()
+            }
+        }
     }
 }
