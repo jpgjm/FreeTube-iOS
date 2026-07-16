@@ -236,19 +236,45 @@ final class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate
     private var diagStartAt: Date?
 
     private func setupDiagnosticOverlay() {
+        // ---------------------------------------------------------------
+        // 診断オーバーレイ (バグ再発防止のためのメモ):
+        //
+        // 前実装は
+        //   - 初期テキスト未設定
+        //   - 高さ制約なし
+        //   - numberOfLines = 0
+        // だったため、Auto Layout で **高さ 0 = 完全に透明** な状態が
+        // JS 評価完了までずっと続き、画面に見えなかった。
+        //
+        // 本実装では:
+        //   1. 生成直後に必ずテキストを設定して intrinsic height を確保
+        //   2. 派手な赤背景で存在を明確化 (見落とし防止)
+        //   3. Swift 側だけで分かる情報 (Bundle 位置、bridge.js 発見、
+        //      www 発見) を即座に反映
+        //   4. WKWebView の後にaddSubview + bringSubviewToFront で
+        //      z-order を確実にトップに
+        //   5. JS 側 _health の取得は補足情報として重ねる (取れないなら
+        //      取れないなりに、Swift のみの情報でも表示は保つ)
+        // ---------------------------------------------------------------
         let label = UILabel()
         label.translatesAutoresizingMaskIntoConstraints = false
         label.numberOfLines = 0
         label.textColor = .white
-        label.backgroundColor = UIColor(white: 0.0, alpha: 0.75)
-        label.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+        label.backgroundColor = UIColor.systemRed.withAlphaComponent(0.85)  // 見落とせない色
+        label.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         label.textAlignment = .left
         label.lineBreakMode = .byWordWrapping
+        // 初期テキスト: Swift 側だけで判っている状態を即座に表示
+        label.text = buildInitialDiagnosticText()
+
         view.addSubview(label)
+        view.bringSubviewToFront(label)  // WKWebView より必ず上に
         NSLayoutConstraint.activate([
             label.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 4),
             label.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -4),
-            label.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 4)
+            label.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 4),
+            // 最低 80pt の高さを保証 — テキストが空でも見える
+            label.heightAnchor.constraint(greaterThanOrEqualToConstant: 80)
         ])
         diagOverlay = label
         diagStartAt = Date()
@@ -258,11 +284,42 @@ final class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate
         tap.numberOfTouchesRequired = 3
         view.addGestureRecognizer(tap)
 
-        // 500ms ごとに情報を書き換える。30 秒経ったら停止&自動フェード。
+        // 500ms ごとに情報を書き換える。60 秒経ったら停止&自動フェード。
         diagTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.updateDiagnostics()
         }
-        updateDiagnostics()
+    }
+
+    /// setupWebView / loadIndex の直後に呼ばれる時点で Swift 側だけで
+    /// 分かっている情報 (bridge.js 検出、www 存在) を最初に表示する。
+    private func buildInitialDiagnosticText() -> String {
+        var lines: [String] = ["FreeTube iOS 診断 (3本指タップ: 再表示)"]
+
+        let bundleURL = Bundle.main.bundleURL
+        lines.append("bundle: \(bundleURL.lastPathComponent)")
+
+        let bridgeRoot = bundleURL.appendingPathComponent("bridge.js")
+        let bridgeSub = bundleURL.appendingPathComponent("JavaScript/bridge.js")
+        let bridgeFound = FileManager.default.fileExists(atPath: bridgeRoot.path)
+            ? "root/bridge.js"
+            : FileManager.default.fileExists(atPath: bridgeSub.path)
+                ? "sub/JavaScript/bridge.js"
+                : "NOT FOUND"
+        lines.append("bridge.js: \(bridgeFound)")
+
+        let wwwDir = bundleURL.appendingPathComponent("www")
+        let wwwExists = FileManager.default.fileExists(atPath: wwwDir.path)
+        lines.append("www/: \(wwwExists ? "OK" : "NOT FOUND")")
+
+        if wwwExists {
+            let index = wwwDir.appendingPathComponent("index.html")
+            lines.append("index.html: \(FileManager.default.fileExists(atPath: index.path) ? "OK" : "MISSING")")
+            if let items = try? FileManager.default.contentsOfDirectory(atPath: wwwDir.path) {
+                lines.append("www 中身(\(items.count)件): \(items.prefix(5).joined(separator: ", "))\(items.count > 5 ? "..." : "")")
+            }
+        }
+        lines.append("初期化直後 - WebView ロード開始待ち...")
+        return lines.joined(separator: "\n")
     }
 
     @objc private func reshowDiagnostics() {
@@ -278,29 +335,53 @@ final class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate
     private func updateDiagnostics() {
         guard let overlay = diagOverlay else { return }
         let elapsed = Date().timeIntervalSince(diagStartAt ?? Date())
-        if elapsed > 30 {
+        if elapsed > 60 {
             diagTimer?.invalidate(); diagTimer = nil
             UIView.animate(withDuration: 1.0) { overlay.alpha = 0 }
             return
         }
-        // JS 側の _health と最新ログを取り出す
+
+        // Swift 側だけで判る情報を「必ず」表示する土台テキストを作る
+        // (JS 評価が失敗しても、これは常に見える)
+        var lines: [String] = [
+            "FreeTube iOS 診断 (elapsed=\(Int(elapsed))s, 3本指タップで再表示)",
+            "webView.url: \(mainWebView?.url?.absoluteString.suffix(70) ?? "(nil)")",
+            "isLoading: \(mainWebView?.isLoading ?? false), estProgress: \(String(format: "%.2f", mainWebView?.estimatedProgress ?? 0))"
+        ]
+        if !loadErrors.isEmpty {
+            lines.append("Swift errors: \(loadErrors.prefix(3).joined(separator: " | "))")
+        }
+
+        // 一旦土台テキストで即時表示 (JS 評価前でも状態は見える)
+        overlay.text = lines.joined(separator: "\n")
+
+        // JS 評価は補足情報として重ねる (失敗しても土台テキストは残る)
         let js = """
             (function(){
-              var out = { url: (location && location.href) || '',
-                          docState: (document && document.readyState) || '?',
-                          bodyBg: '',
-                          bodyHTMLLen: 0 };
+              var out = {
+                docState: (document && document.readyState) || '?',
+                bodyBg: '',
+                bodyHTMLLen: 0,
+                title: (document && document.title) || ''
+              };
               try { out.bodyBg = document.body && getComputedStyle(document.body).backgroundColor; } catch(e) {}
               try { out.bodyHTMLLen = (document.body && document.body.innerHTML.length) || 0; } catch(e) {}
               if (window.Android && window.Android._health) {
-                out.h = window.Android._health;
+                var h = window.Android._health;
+                out.bridge = {
+                  post: h.postCount || 0,
+                  resolve: h.resolveCount || 0,
+                  handler: h.webkitHandlerAvailable || false,
+                  lastPost: h.lastPostName || '',
+                  firstError: h.firstError || ''
+                };
               } else {
-                out.h = null;
+                out.bridge = null;
               }
               if (window.Android && window.Android._logs) {
-                var logs = window.Android._logs.slice(-3);
+                var logs = window.Android._logs.slice(-4);
                 out.logs = logs.map(function(l){
-                  return '['+ l.level + '] ' + String(l.message).slice(0, 200);
+                  return '['+ l.level + '] ' + String(l.message || '').slice(0, 120);
                 });
               } else {
                 out.logs = [];
@@ -308,37 +389,42 @@ final class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate
               return JSON.stringify(out);
             })();
             """
-        mainWebView?.evaluateJavaScript(js) { [weak self] result, err in
-            guard let self = self else { return }
-            var text = "FreeTube iOS diag (elapsed=\(Int(elapsed))s, 3-finger tap: reshow)"
+        mainWebView?.evaluateJavaScript(js) { [weak overlay] result, err in
+            guard let overlay = overlay else { return }
+            var extra: [String] = []
             if let err = err {
-                text += "\nevalJS err: \(err.localizedDescription)"
+                extra.append("evalJS err: \(err.localizedDescription.prefix(120))")
             } else if let s = result as? String, let data = s.data(using: .utf8),
                       let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                let url = (obj["url"] as? String) ?? "?"
                 let docState = (obj["docState"] as? String) ?? "?"
                 let bodyBg = (obj["bodyBg"] as? String) ?? "?"
                 let bodyLen = (obj["bodyHTMLLen"] as? Int) ?? 0
-                text += "\nurl: \(url.suffix(60))"
-                text += "\ndoc: \(docState)  body.bg: \(bodyBg)  body.htmlLen: \(bodyLen)"
-                if let h = obj["h"] as? [String: Any] {
-                    let post = (h["postCount"] as? Int) ?? 0
-                    let resolve = (h["resolveCount"] as? Int) ?? 0
-                    let lastPost = (h["lastPostName"] as? String) ?? "(none)"
-                    let hasHandler = (h["webkitHandlerAvailable"] as? Bool) ?? false
-                    let firstErr = (h["firstError"] as? String) ?? ""
-                    text += "\nbridge: post=\(post) resolve=\(resolve) handler=\(hasHandler) lastPost=\(lastPost)"
-                    if !firstErr.isEmpty { text += "\nfirstErr: \(firstErr.prefix(200))" }
+                let title = (obj["title"] as? String) ?? ""
+                extra.append("doc=\(docState) bg=\(bodyBg) htmlLen=\(bodyLen) title=\(title.prefix(30))")
+                if let b = obj["bridge"] as? [String: Any] {
+                    let post = (b["post"] as? Int) ?? 0
+                    let resolve = (b["resolve"] as? Int) ?? 0
+                    let handler = (b["handler"] as? Bool) ?? false
+                    let lastPost = (b["lastPost"] as? String) ?? ""
+                    let firstErr = (b["firstError"] as? String) ?? ""
+                    extra.append("bridge: post=\(post) resolve=\(resolve) handler=\(handler) lastPost=\(lastPost)")
+                    if !firstErr.isEmpty {
+                        extra.append("bridge.firstError: \(firstErr.prefix(200))")
+                    }
                 } else {
-                    text += "\nbridge: (Android未定義)"
+                    extra.append("bridge: window.Android 未定義")
                 }
                 if let logs = obj["logs"] as? [String], !logs.isEmpty {
-                    text += "\nlogs:\n" + logs.joined(separator: "\n")
+                    extra.append("logs:")
+                    extra.append(contentsOf: logs.map { "  " + $0 })
                 }
             } else {
-                text += "\n(evalJS returned non-string result)"
+                extra.append("evalJS: 結果なし")
             }
-            overlay.text = text
+            // 土台テキスト + JS 追加情報
+            var combined = lines
+            combined.append(contentsOf: extra)
+            overlay.text = combined.joined(separator: "\n")
         }
     }
 
